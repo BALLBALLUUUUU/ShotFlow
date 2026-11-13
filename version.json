@@ -1,0 +1,11 @@
+{
+  "version": "1.1.0",
+  "mandatory": true,
+  "publishedAt": "2026-11-13T05:30:00Z",
+  "notes": "1. 启动时自动联网校验版本，旧版本必须更新后才能继续使用。\n2. 分镜表格、故事板、拍摄计划、Rundown 通告的整体流程保持不变。\n3. 更新只替换应用本体，本机项目库与云端备份都不受影响。",
+  "page": "https://github.com/BALLBALLUUUUU/ShotFlow/releases",
+  "assets": {
+    "mac": "https://github.com/BALLBALLUUUUU/ShotFlow/releases/latest/download/ShotFlow-mac.dmg",
+    "win": "https://github.com/BALLBALLUUUUU/ShotFlow/releases/latest/download/ShotFlow-win-x64.exe"
+  }
+}

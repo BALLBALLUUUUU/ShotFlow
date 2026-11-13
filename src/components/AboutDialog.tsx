@@ -3,11 +3,13 @@ import { CheckCircle2, ExternalLink, Loader2, RefreshCw, X } from 'lucide-react'
 import appLogo from '@/assets/logo.png';
 import { useCloud } from '@/store/cloudStore';
 import {
-  compareVersions,
-  normalizeTagVersion,
+  decideUpdate,
+  DEFAULT_UPDATE_REPO,
   parseRepoRef,
+  pickManifest,
+  platformFrom,
   releasesUrl,
-  type LatestRelease,
+  type UpdateDecision,
 } from '@/domain/update';
 
 const REPO_KEY = 'shotflow.update.repo.v1';
@@ -16,7 +18,7 @@ type CheckState =
   | { kind: 'idle' }
   | { kind: 'checking' }
   | { kind: 'latest'; version: string }
-  | { kind: 'newer'; release: LatestRelease; version: string }
+  | { kind: 'newer'; decision: UpdateDecision }
   | { kind: 'error'; message: string };
 
 interface Props {
@@ -25,9 +27,9 @@ interface Props {
 
 function readRepo(): string {
   try {
-    return window.localStorage.getItem(REPO_KEY) ?? '';
+    return window.localStorage.getItem(REPO_KEY) ?? DEFAULT_UPDATE_REPO;
   } catch {
-    return '';
+    return DEFAULT_UPDATE_REPO;
   }
 }
 
@@ -74,8 +76,8 @@ export default function AboutDialog({ onClose }: Props) {
       setState({
         kind: 'error',
         message: repoInput.trim()
-          ? '仓库地址要写成 owner/repo（例如 yourname/shotflow）'
-          : '先填更新仓库，格式 owner/repo（例如 yourname/shotflow）',
+          ? '仓库地址要写成 owner/repo（例如 BALLBALLUUUUU/ShotFlow）'
+          : '先填更新仓库，格式 owner/repo（例如 BALLBALLUUUUU/ShotFlow）',
       });
       return;
     }
@@ -83,44 +85,57 @@ export default function AboutDialog({ onClose }: Props) {
     setState({ kind: 'checking' });
     try {
       const api = window.electronAPI;
-      let release: LatestRelease;
-
       if (api?.checkUpdate) {
-        const result = await api.checkUpdate(target.slug);
+        const result = await api.checkUpdate({ repo: target.slug });
         if (!result.ok) {
           setState({ kind: 'error', message: result.error });
           return;
         }
-        release = result.release;
-      } else {
-        // 浏览器预览：GitHub API 允许跨域，直接用 fetch
-        const response = await fetch(`https://api.github.com/repos/${target.slug}/releases/latest`, {
-          headers: { Accept: 'application/vnd.github+json' },
-        });
-        if (response.status === 404) {
-          setState({ kind: 'error', message: '该仓库还没有发布 Release' });
+        const picked = pickManifest(result.candidates ?? [], releasesUrl(target));
+        const decision = decideUpdate(
+          result.current || version,
+          picked?.manifest ?? null,
+          platformFrom(result.platform),
+        );
+        if (!decision) {
+          setState({ kind: 'error', message: '没有读到有效的版本清单' });
           return;
         }
-        if (!response.ok) {
-          setState({ kind: 'error', message: `GitHub 返回 ${response.status}` });
-          return;
-        }
-        const data = await response.json();
-        release = {
-          version: String(data.tag_name ?? ''),
-          tag: String(data.tag_name ?? ''),
-          url: String(data.html_url ?? ''),
-          name: String(data.name ?? ''),
-          notes: String(data.body ?? ''),
-          publishedAt: String(data.published_at ?? ''),
-        };
+        if (decision.hasUpdate) setState({ kind: 'newer', decision });
+        else setState({ kind: 'latest', version: decision.latest });
+        return;
       }
 
-      const latest = normalizeTagVersion(release.version);
-      if (compareVersions(latest, version) > 0) setState({ kind: 'newer', release, version: latest });
-      else setState({ kind: 'latest', version: latest });
+      // 浏览器预览：GitHub API 允许跨域，直接用 fetch
+      const response = await fetch(`https://api.github.com/repos/${target.slug}/releases/latest`, {
+        headers: { Accept: 'application/vnd.github+json' },
+      });
+      if (response.status === 404) {
+        setState({ kind: 'error', message: '该仓库还没有发布 Release' });
+        return;
+      }
+      if (!response.ok) {
+        setState({ kind: 'error', message: `GitHub 返回 ${response.status}` });
+        return;
+      }
+      const data = await response.json();
+      const picked = pickManifest([{ source: 'release', payload: {
+        version: String(data.tag_name ?? ''),
+        notes: String(data.body ?? ''),
+        publishedAt: String(data.published_at ?? ''),
+        page: String(data.html_url ?? ''),
+        mandatory: false,
+        assets: [],
+      } }], releasesUrl(target));
+      const decision = decideUpdate(version, picked?.manifest ?? null, platformFrom(navigator.platform));
+      if (!decision) {
+        setState({ kind: 'error', message: '没有读到有效的版本信息' });
+        return;
+      }
+      if (decision.hasUpdate) setState({ kind: 'newer', decision });
+      else setState({ kind: 'latest', version: decision.latest });
     } catch {
-      setState({ kind: 'error', message: '无法连接 GitHub，请检查网络后重试' });
+      setState({ kind: 'error', message: '无法连接更新服务器，请检查网络后重试' });
     }
   }
 
@@ -131,7 +146,7 @@ export default function AboutDialog({ onClose }: Props) {
       case 'latest':
         return { tone: 'ok', text: `已是最新版本（v${state.version}）` };
       case 'newer':
-        return { tone: 'new', text: `发现新版本 v${state.version}（当前 v${version}）` };
+        return { tone: 'new', text: `发现新版本 v${state.decision.latest}（当前 v${version}）` };
       case 'error':
         return { tone: 'bad', text: state.message };
       default:
@@ -203,7 +218,7 @@ export default function AboutDialog({ onClose }: Props) {
               <input
                 className="text-input"
                 value={repoInput}
-                placeholder="owner/repo，例如 yourname/shotflow"
+                placeholder="owner/repo，例如 BALLBALLUUUUU/ShotFlow"
                 aria-label="更新仓库"
                 onChange={(event) => {
                   const value = event.currentTarget.value;
@@ -232,7 +247,12 @@ export default function AboutDialog({ onClose }: Props) {
               {status.tone === 'ok' ? <CheckCircle2 size={13} /> : null}
               <span>{status.text}</span>
               {state.kind === 'newer' ? (
-                <a className="about-link" href={state.release.url} target="_blank" rel="noreferrer">
+                <a
+                  className="about-link"
+                  href={state.decision.pageUrl || `https://github.com/${DEFAULT_UPDATE_REPO}/releases`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
                   下载新版<ExternalLink size={12} />
                 </a>
               ) : null}

@@ -3,21 +3,30 @@
 interface ElectronBridge {
   isElectron: boolean;
   getVersion: () => Promise<string>;
+  getVersionInfo: () => Promise<{ version: string; platform: string; packaged: boolean }>;
   setTheme: (dark: boolean) => void;
-  checkUpdate: (repo: string) => Promise<
+  checkUpdate: (payload: string | { repo?: string }) => Promise<
     | {
       ok: true;
-      release: {
-        version: string;
-        tag: string;
-        url: string;
-        name: string;
-        notes: string;
-        publishedAt: string;
-      };
+      slug: string;
+      candidates: { source: string; payload: unknown }[];
+      platform: string;
+      packaged: boolean;
+      current: string;
     }
     | { ok: false; error: string }
   >;
+  probeUpdate: (url: string) => Promise<{ ok: boolean; status: number; error?: string }>;
+  downloadUpdate: (payload: { url: string; name: string }) => Promise<
+    { ok: true; filePath: string; size: number } | { ok: false; error: string }
+  >;
+  installUpdate: (payload: { filePath: string }) => Promise<
+    { ok: true; mode?: string } | { ok: false; error: string }
+  >;
+  openUpdatePage: (url: string) => Promise<{ ok: boolean; error?: string }>;
+  setUpdateGate: (locked: boolean) => Promise<boolean>;
+  relaunchApp: () => Promise<void>;
+  onUpdateProgress: (handler: (progress: { received: number; total: number; percent: number }) => void) => () => void;
   openProject: () => Promise<{ canceled?: boolean; text?: string; filePath?: string }>;
   saveProject: (payload: { text: string; filePath?: string | null }) => Promise<{ canceled?: boolean; filePath?: string }>;
   exportFile: (payload: { base64: string; defaultName: string }) => Promise<{ canceled?: boolean; filePath?: string }>;

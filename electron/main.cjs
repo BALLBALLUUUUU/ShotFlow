@@ -3,10 +3,13 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { createCloudHost } = require('./cloud-host.cjs');
 const { DEFAULT_TARGET, readTarget, writeTarget } = require('./cloud-config.cjs');
+const updater = require('./updater.cjs');
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
 let currentFilePath = null;
 let mainWindow = null;
+// 强制更新期间锁住应用：只剩退出，重载/开发者工具也一并拦掉
+let gateLocked = false;
 
 // 自用调试开关：设置环境变量才启用，正常双击启动不受影响
 if (process.env.SHOTFLOW_DEBUG_PORT) {
@@ -33,6 +36,16 @@ function sendMenuAction(action) {
 
 function buildApplicationMenu() {
   const isMac = process.platform === 'darwin';
+
+  if (gateLocked) {
+    const quit = { role: 'quit', label: '退出 ShotFlow' };
+    const template = isMac
+      ? [{ label: 'ShotFlow', submenu: [{ role: 'about', label: '关于 ShotFlow' }, { type: 'separator' }, quit] }]
+      : [{ label: '文件', submenu: [quit] }];
+    Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+    return;
+  }
+
   const appMenu = {
     label: 'ShotFlow',
     submenu: [
@@ -106,6 +119,10 @@ function buildApplicationMenu() {
       label: '帮助',
       submenu: [
         {
+          label: '检查更新…',
+          click: () => sendMenuAction('check-update'),
+        },
+        {
           label: '打开应用数据文件夹',
           click: () => shell.openPath(app.getPath('userData')),
         },
@@ -139,6 +156,16 @@ function createWindow() {
   mainWindow = win;
   win.on('closed', () => {
     if (mainWindow === win) mainWindow = null;
+  });
+
+  // 强制更新时不给「刷新页面 / 打开开发者工具」这类绕过入口
+  win.webContents.on('before-input-event', (event, input) => {
+    if (!gateLocked) return;
+    const key = String(input.key || '').toLowerCase();
+    const mod = input.meta || input.control;
+    const reload = key === 'f5' || (mod && key === 'r');
+    const devtools = key === 'f12' || (mod && input.alt && key === 'i') || (mod && input.shift && key === 'i');
+    if (reload || devtools) event.preventDefault();
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -208,36 +235,98 @@ app.on('before-quit', () => {
   cloudHost.dispose();
 });
 
-/** 检查更新：主进程发请求，避免渲染进程在 file:// 下受 CORS 限制 */
-ipcMain.handle('update:check', async (_event, repo) => {
-  const slug = String(repo || '').trim();
-  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(slug)) {
-    return { ok: false, error: '仓库地址格式应为 owner/repo' };
-  }
+/**
+ * 版本校验：主进程只负责取远端清单（走系统代理、无 CORS 限制），
+ * 「算不算新版本、要不要强制」交给渲染层的纯函数，便于单测。
+ */
+ipcMain.handle('update:check', async (_event, payload) => {
+  const repo = typeof payload === 'string' ? payload : payload && payload.repo;
   try {
-    const response = await fetch(`https://api.github.com/repos/${slug}/releases/latest`, {
-      headers: { 'User-Agent': 'ShotFlow', Accept: 'application/vnd.github+json' },
-      signal: AbortSignal.timeout(9000),
-    });
-    if (response.status === 404) return { ok: false, error: '该仓库还没有发布 Release' };
-    if (response.status === 403) return { ok: false, error: 'GitHub 接口限流，请稍后再试' };
-    if (!response.ok) return { ok: false, error: `GitHub 返回 ${response.status}` };
-    const data = await response.json();
+    const result = await updater.collectCandidates(repo);
     return {
       ok: true,
-      release: {
-        version: String(data.tag_name || ''),
-        tag: String(data.tag_name || ''),
-        url: String(data.html_url || ''),
-        name: String(data.name || ''),
-        notes: String(data.body || ''),
-        publishedAt: String(data.published_at || ''),
-      },
+      ...result,
+      platform: process.platform,
+      packaged: app.isPackaged,
+      current: app.getVersion(),
     };
   } catch (error) {
-    const timedOut = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
-    return { ok: false, error: timedOut ? '请求超时，请检查网络后重试' : '无法连接 GitHub，请检查网络' };
+    const name = error && error.name;
+    const status = error && error.status;
+    const message = status === 404
+      ? '更新服务器上还没有可用的版本清单'
+      : name === 'AbortError'
+        ? '检查更新超时，请检查网络后重试'
+        : '无法连接更新服务器';
+    return { ok: false, error: message };
   }
+});
+
+ipcMain.handle('update:probe', async (_event, url) => {
+  try {
+    return { ok: true, ...(await updater.probeAsset(url)) };
+  } catch (error) {
+    return { ok: false, status: 0, error: error instanceof Error ? error.message : '更新包地址无效' };
+  }
+});
+
+ipcMain.handle('update:download', async (event, payload) => {
+  try {
+    const result = await updater.downloadAsset(payload && payload.url, payload && payload.name, (progress) => {
+      if (!event.sender.isDestroyed()) event.sender.send('update:progress', progress);
+    });
+    return { ok: true, ...result };
+  } catch (error) {
+    const name = error && error.name;
+    const code = error && error.code;
+    const message = name === 'AbortError'
+      ? '下载超时，请检查网络后重试'
+      : code === 'ENOSPC'
+        ? '磁盘空间不足，请清理后重试'
+        : (error instanceof Error ? error.message : '下载失败');
+    return { ok: false, error: message };
+  }
+});
+
+ipcMain.handle('update:install', async (_event, payload) => {
+  try {
+    return { ok: true, ...(await updater.installAsset(payload && payload.filePath)) };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : '无法启动安装程序' };
+  }
+});
+
+ipcMain.handle('update:openPage', async (_event, url) => {
+  try {
+    await updater.openPage(url);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : '无法打开下载页' };
+  }
+});
+
+/** 渲染层告知是否处于强制更新状态：锁定时裁掉菜单与刷新/调试快捷键 */
+ipcMain.handle('update:gate', (_event, locked) => {
+  const next = Boolean(locked);
+  if (next === gateLocked) return true;
+  gateLocked = next;
+  buildApplicationMenu();
+  if (next) {
+    const win = BrowserWindow.getFocusedWindow() || mainWindow;
+    if (win && !win.isDestroyed()) win.webContents.closeDevTools();
+  }
+  return true;
+});
+
+ipcMain.handle('app:versionInfo', () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  packaged: app.isPackaged,
+}));
+
+ipcMain.handle('app:relaunch', () => {
+  app.relaunch();
+  app.exit(0);
 });
 
 /** 界面切主题时同步原生主题与窗口底色，避免深色下露出浅色底 */

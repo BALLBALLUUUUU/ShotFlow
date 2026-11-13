@@ -14,6 +14,7 @@
 - **导出**：`.shotflow` 项目包、分镜表 Excel / PDF / 图片、Rundown 文档，导出时自动把内嵌图片抽离为独立资源。
 - **项目库**：颜色标签（红 / 橙 / 黄 / 绿 / 蓝 / 紫 / 灰）用于区分优先级，支持按标签筛选与分区展示；回收站、重命名、复制、搜索、排序。
 - **撤销 / 重做**：`⌘Z` / `⇧⌘Z`，同一处连续输入合并为一步。
+- **启动版本校验**：打开软件先联网核对版本，不是最新版就整屏拦住（更新说明、一键下载安装包），不更新无法继续使用。
 - **可选云同步**：微信扫码登录后，项目在设备之间双向同步（内容哈希判定 + 冲突弹窗，绝不自动覆盖）；未登录时完全不联网，编辑只写本地。
 
 ## 技术栈
@@ -47,6 +48,31 @@ npm run dist:win     # release/ShotFlow-<version>-win-x64.exe
 ```
 
 产物在 `release/`，不随仓库提交。
+
+## 版本校验与发布新版本
+
+应用启动时会先读一次远端版本清单（`version.json`），比本机版本高就整屏拦住，必须更新后才能继续用。
+
+清单来源按顺序尝试，第一个成功即用，多份都会带回渲染层取最高版本：
+
+1. `https://cdn.jsdelivr.net/gh/BALLBALLUUUUU/ShotFlow@main/version.json`
+2. `https://raw.githubusercontent.com/BALLBALLUUUUU/ShotFlow/main/version.json`
+3. GitHub Releases 最新 release（兜底）
+
+发一个新版本：
+
+1. 改 `package.json` 的 `version`，同步改 `version.json` 的 `version`、`notes`
+2. `npm run dist:mac` / `npm run dist:win` 打包
+3. GitHub 建 Release，tag 用 `v<version>`，上传两个安装包并**重命名**为 `ShotFlow-mac.dmg`、`ShotFlow-win-x64.exe`
+   （`version.json` 里用的是 `releases/latest/download/<固定名>`，以后换版本不用再改清单地址）
+4. 推送 `version.json`，然后刷新 CDN 缓存：`curl https://purge.jsdelivr.net/gh/BALLBALLUUUUU/ShotFlow@main/version.json`
+
+几条硬规则：
+
+- 只有「远端更高 + 清单要求强制 + 当前平台有安装包**且探测得到**」才锁界面；缺安装包时只提示不锁，避免把人锁在下载不到的死页面上。
+- 检查失败（断网、超时、清单 404）一律放行，否则没网就等于软件报废；但一旦锁过一次，结论会写进本机，断网重启仍然锁。
+- 锁定期间应用菜单只剩「退出」，`⌘R` / `F12` 这类绕过入口被主进程拦掉。
+- 「关于 ShotFlow → 检查更新」可手动检查；仓库地址可改，指向自己部署的清单。
 
 ## 数据存放
 

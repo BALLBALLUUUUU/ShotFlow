@@ -20,6 +20,8 @@ import { bindCloudEvents, useCloud } from '@/store/cloudStore';
 import { initCloudSync } from '@/store/cloudSync';
 import { useTheme } from '@/store/themeStore';
 import CloudConflictDialog from '@/components/CloudConflictDialog';
+import UpdateGate from '@/components/UpdateGate';
+import { bootstrapUpdateGate, useUpdate } from '@/store/updateStore';
 import ShotTablePage from '@/routes/ShotTablePage';
 import StoryboardPage from '@/routes/StoryboardPage';
 import PlanPage from '@/routes/PlanPage';
@@ -214,6 +216,16 @@ function useLibraryIntegration(
         case 'help':
           useProjectStore.getState().setToast('快捷键：⌘N 新建项目 · ⌘O 打开 · ⌘S 保存 · ⌘Z 撤销 · ⇧⌘Z 重做 · ⌘1~5 切换页签');
           break;
+        case 'check-update':
+          void useUpdate.getState().recheck().then(() => {
+            const state = useUpdate.getState();
+            if (state.phase === 'blocked') return;
+            const toast = useProjectStore.getState().setToast;
+            if (state.checkError) toast(state.checkError);
+            else if (state.decision?.hasUpdate) toast(`发现新版本 v${state.decision.latest}，可在「关于 ShotFlow」中下载`);
+            else toast('已是最新版本');
+          });
+          break;
         default:
           break;
       }
@@ -373,6 +385,11 @@ export default function App() {
   const dark = useTheme((state) => state.dark);
   const toggleTheme = useTheme((state) => state.toggle);
 
+  // 打开软件就先校验版本：不通过时 UpdateGate 会整屏接管
+  useEffect(() => {
+    bootstrapUpdateGate();
+  }, []);
+
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
     window.electronAPI?.setTheme?.(dark);
@@ -385,9 +402,11 @@ export default function App() {
 
   return (
     <HashRouter>
-      <Root dark={dark} onToggleTheme={toggleTheme} />
-      {/* 冲突弹窗挂在路由外层：不管在哪一页都能看到并处理 */}
-      <CloudConflictDialog />
+      <UpdateGate>
+        <Root dark={dark} onToggleTheme={toggleTheme} />
+        {/* 冲突弹窗挂在路由外层：不管在哪一页都能看到并处理 */}
+        <CloudConflictDialog />
+      </UpdateGate>
     </HashRouter>
   );
 }
