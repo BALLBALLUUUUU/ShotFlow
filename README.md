@@ -53,11 +53,12 @@ npm run dist:win     # release/ShotFlow-<version>-win-x64.exe
 
 应用启动时会先读一次远端版本清单（`version.json`），比本机版本高就整屏拦住，必须更新后才能继续用。
 
-清单来源按顺序尝试，第一个成功即用，多份都会带回渲染层取最高版本：
+清单来源并行尝试，第一个成功后还会再等 450ms 收集其它源，多份取最高版本：
 
 1. `https://cdn.jsdelivr.net/gh/BALLBALLUUUUU/ShotFlow@main/version.json`
-2. `https://raw.githubusercontent.com/BALLBALLUUUUU/ShotFlow/main/version.json`
-3. GitHub Releases 最新 release（兜底）
+2. `https://raw.githubusercontent.com/BALLBALLUUUUU/ShotFlow/main/version.json`（国内常不可达，不阻塞启动）
+3. `https://api.github.com/repos/BALLBALLUUUUU/ShotFlow/contents/version.json?ref=main`（限流 60 次/小时，只兜底）
+4. GitHub Releases 最新 release（都没读到才用）
 
 发一个新版本：
 
