@@ -16,7 +16,7 @@ interface ElectronBridge {
     }
     | { ok: false; error: string }
   >;
-  probeUpdate: (url: string) => Promise<{ ok: boolean; status: number; error?: string }>;
+  probeUpdate: (url: string) => Promise<{ ok: boolean; status: number; size?: number; error?: string }>;
   downloadUpdate: (payload: { url: string; name: string }) => Promise<
     { ok: true; filePath: string; size: number } | { ok: false; error: string }
   >;

@@ -60,6 +60,20 @@ async function fetchJson(url, timeoutMs) {
   }
 }
 
+/**
+ * GitHub Contents API：raw 域名在国内经常不可达、jsDelivr 的 @main 又会缓存，
+ * 这条接口一般能连上，代价是未登录每小时 60 次（启动一次只发一个请求）。
+ */
+async function fetchManifestViaApi(slug) {
+  const data = await fetchJson(
+    `https://api.github.com/repos/${slug}/contents/version.json?ref=main`,
+    API_TIMEOUT,
+  );
+  if (!data || typeof data.content !== 'string' || !data.content) throw new Error('清单内容为空');
+  const text = Buffer.from(String(data.content).replace(/\s/g, ''), 'base64').toString('utf8');
+  return JSON.parse(text);
+}
+
 function releaseToManifest(data, slug) {
   const tag = String(data && data.tag_name ? data.tag_name : '');
   const assets = Array.isArray(data && data.assets) ? data.assets : [];
@@ -95,8 +109,9 @@ function collectManifests(sources) {
       if (timer) clearTimeout(timer);
       resolve(results);
     };
-    sources.forEach(([source, url]) => {
-      fetchJson(url, MANIFEST_TIMEOUT)
+    sources.forEach(([source, load]) => {
+      Promise.resolve()
+        .then(load)
         .then((payload) => {
           results.push({ source, payload });
           if (!firstOk) {
@@ -126,8 +141,9 @@ async function collectCandidates(repoInput) {
   }
 
   const sources = [
-    ['raw', `https://raw.githubusercontent.com/${slug}/main/version.json`],
-    ['jsdelivr', `https://cdn.jsdelivr.net/gh/${slug}@main/version.json`],
+    ['jsdelivr', () => fetchJson(`https://cdn.jsdelivr.net/gh/${slug}@main/version.json`, MANIFEST_TIMEOUT)],
+    ['raw', () => fetchJson(`https://raw.githubusercontent.com/${slug}/main/version.json`, MANIFEST_TIMEOUT)],
+    ['api', () => fetchManifestViaApi(slug)],
   ];
   const candidates = await collectManifests(sources);
 
@@ -183,9 +199,9 @@ async function probeAsset(rawUrl) {
       signal: controller.signal,
       headers: { 'User-Agent': 'ShotFlow' },
     });
-    return { ok: response.ok, status: response.status };
+    return { ok: response.ok, status: response.status, size: Number(response.headers.get('content-length')) || 0 };
   } catch {
-    return { ok: false, status: 0 };
+    return { ok: false, status: 0, size: 0 };
   } finally {
     clearTimeout(timer);
   }

@@ -40,6 +40,7 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
   const installing = useUpdate((state) => state.installing);
   const progress = useUpdate((state) => state.progress);
   const saved = useUpdate((state) => state.saved);
+  const remoteSize = useUpdate((state) => state.remoteSize);
   const actionError = useUpdate((state) => state.actionError);
   const recheck = useUpdate((state) => state.recheck);
   const download = useUpdate((state) => state.download);
@@ -60,7 +61,7 @@ export default function UpdateGate({ children }: { children: ReactNode }) {
   if (phase === 'checking') return <Splash />;
   if (phase !== 'blocked' || !decision) return <>{children}</>;
 
-  const size = formatBytes(decision.downloadSize || saved?.size || 0);
+  const size = formatBytes(decision.downloadSize || remoteSize || saved?.size || 0);
   const percent = Math.max(0, Math.min(100, progress?.percent ?? 0));
 
   return (

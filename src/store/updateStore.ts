@@ -53,6 +53,8 @@ interface UpdateState {
   downloading: boolean;
   installing: boolean;
   progress: UpdateProgress | null;
+  /** 远端安装包体积（HEAD 探测得到），下载前就能告诉用户多大 */
+  remoteSize: number;
   saved: { filePath: string; size: number } | null;
   actionError: string | null;
   bootstrap: () => Promise<void>;
@@ -169,6 +171,7 @@ export const useUpdate = create<UpdateState>((set, get) => ({
   downloading: false,
   installing: false,
   progress: null,
+  remoteSize: 0,
   saved: null,
   actionError: null,
 
@@ -244,6 +247,7 @@ export const useUpdate = create<UpdateState>((set, get) => ({
         // 清单写了地址但包还没上传时不能锁，否则用户卡在没有安装包的页面
         if (decision.downloadUrl && api.probeUpdate) {
           const probe = await api.probeUpdate(decision.downloadUrl);
+          if (probe.ok && (probe.size ?? 0) > 0) set({ remoteSize: probe.size ?? 0 });
           if (!probe.ok) {
             clearLock();
             set({
