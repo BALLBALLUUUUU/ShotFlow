@@ -1,0 +1,16 @@
+node_modules/
+dist/
+release/
+out/
+*.tsbuildinfo
+.DS_Store
+.env.local
+coverage/
+
+# 本地素材与导出产物（体积大，按需自行生成）
+sample-art/
+deliverables/
+
+# 根目录误留下的构建产物
+/index-*.js
+*.blockmap

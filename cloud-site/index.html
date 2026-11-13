@@ -1,0 +1,432 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ShotFlow 云桥</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0f1115;
+    --card: #171a21;
+    --text: #eceef2;
+    --muted: #9aa2ae;
+    --accent: #f5c451;
+    --line: #262b35;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f6f7f9; --card: #ffffff; --text: #16181d; --muted: #6b7280; --line: #e6e8ec; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .card {
+    width: min(420px, calc(100vw - 40px)); padding: 28px 26px 24px;
+    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28); text-align: center;
+  }
+  h1 { margin: 0 0 6px; font-size: 17px; letter-spacing: 0.01em; }
+  p { margin: 0; color: var(--muted); font-size: 13px; }
+  .dot {
+    width: 34px; height: 34px; margin: 0 auto 14px; border-radius: 10px;
+    background: linear-gradient(140deg, var(--accent), #e0972f);
+    display: grid; place-items: center; color: #20180a; font-weight: 700; font-size: 15px;
+  }
+  .actions { margin-top: 18px; display: flex; gap: 10px; justify-content: center; }
+  button {
+    appearance: none; border: 0; border-radius: 9px; padding: 10px 18px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: #20180a;
+  }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+  .err { margin-top: 14px; color: #ff8b80; font-size: 12px; word-break: break-all; }
+  .ok { color: #7ad19a; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="dot">SF</div>
+    <h1 id="title">ShotFlow 云桥</h1>
+    <p id="status">正在初始化…</p>
+    <div class="actions" id="actions" hidden>
+      <button type="button" id="login">微信扫码登录</button>
+    </div>
+    <div class="err" id="error" hidden></div>
+  </main>
+
+  <script src="./sdk.js"></script>
+  <script>
+  (function () {
+    'use strict';
+    var CONFIG = {
+      endpoint: 'https://shotflow.app.workbuddy.host',
+      oauthRelayBaseUrl: 'https://www.workbuddy.cn/v2/as/genie-baas/oauth',
+      publishableKey: 'wbpk_HQpPnbCIe27dNA21jo8aCr_DdajCJMgyC1k0MGP4NzR4TNbdk3SipcG'
+    };
+
+    var $title = document.getElementById('title');
+    var $status = document.getElementById('status');
+    var $error = document.getElementById('error');
+    var $actions = document.getElementById('actions');
+    var $login = document.getElementById('login');
+
+    function setStatus(text) { $status.textContent = text; }
+    function setError(text) {
+      $error.textContent = text || '';
+      $error.hidden = !text;
+    }
+
+    // ---- 传输层：Electron 内走 preload，浏览器内走 postMessage ----
+    var transport = (function () {
+      if (window.shotflowCloud) return window.shotflowCloud;
+      return {
+        send: function (msg) { if (window.parent !== window) window.parent.postMessage(msg, '*'); },
+        onMessage: function (fn) { window.addEventListener('message', function (e) { fn(e.data); }); }
+      };
+    })();
+
+    function send(msg) { try { transport.send(msg); } catch (e) { /* 宿主已关闭 */ } }
+    function emit(event, data) { send({ type: 'event', event: event, data: data }); }
+
+    var cloud = null;
+    var initError = null;
+    try {
+      cloud = WorkBuddyCloud.createWorkBuddyCloud(CONFIG);
+    } catch (e) {
+      initError = e && e.message ? e.message : String(e);
+    }
+
+    var session = null;
+
+    function pickSession(result) {
+      if (!result) return null;
+      if (result.data && result.data.session !== undefined) return result.data.session;
+      return result.data || null;
+    }
+
+    async function readSession() {
+      if (!cloud) return null;
+      try {
+        var res = await cloud.auth.getSession();
+        session = pickSession(res);
+      } catch (e) {
+        session = null;
+      }
+      return session;
+    }
+
+    function userOf(s) {
+      if (!s) return null;
+      var u = s.user || (s.session && s.session.user) || null;
+      if (!u) return null;
+      return {
+        id: u.id || null,
+        name: u.name || u.nickname || u.user_metadata && (u.user_metadata.name || u.user_metadata.nickname) || null,
+        avatar: u.avatar_url || u.user_metadata && u.user_metadata.avatar_url || null
+      };
+    }
+
+    function describe() {
+      var u = userOf(session);
+      return { signedIn: Boolean(session), user: u };
+    }
+
+    // ---- 启动：先处理微信回调，再恢复会话 ----
+    async function bootstrap() {
+      if (initError) {
+        setStatus('云服务初始化失败');
+        setError(initError);
+        emit('ready', { ok: false, signedIn: false, error: initError });
+        return;
+      }
+      var url = new URL(location.href);
+      var hasCallback = url.searchParams.has('code') || url.searchParams.has('error');
+
+      if (hasCallback) {
+        var provider = url.searchParams.get('provider');
+        var handler = provider === 'wechat'
+          ? cloud.auth.handleWechatWebCallback
+          : provider === 'workbuddy' ? cloud.auth.handleWorkBuddyCallback : null;
+        if (!handler) {
+          setStatus('授权回调缺少有效的登录方式');
+          emit('ready', { ok: false, signedIn: false, error: 'bad_callback' });
+          return;
+        }
+        setStatus('正在完成登录…');
+        try {
+          var res = await handler.call(cloud.auth);
+          if (res && res.error) {
+            setError(res.error.message || String(res.error));
+            setStatus('登录失败');
+            emit('ready', { ok: false, signedIn: false, error: res.error.message || 'callback_failed' });
+            return;
+          }
+          session = pickSession(res);
+          ['code', 'state', 'provider'].forEach(function (k) { url.searchParams.delete(k); });
+          history.replaceState(null, '', url.pathname + url.search + url.hash);
+        } catch (e) {
+          setError(e && e.message ? e.message : String(e));
+          setStatus('登录失败');
+          emit('ready', { ok: false, signedIn: false, error: 'callback_exception' });
+          return;
+        }
+      }
+
+      if (!session) await readSession();
+      var info = describe();
+      if (info.user) {
+        var name = info.user.name || '已登录';
+        $title.textContent = 'ShotFlow 云桥';
+        setStatus('已登录：' + name);
+        $login.hidden = true;
+      } else {
+        setStatus('未登录');
+        $actions.hidden = false;
+      }
+      emit('ready', Object.assign({ ok: true }, info));
+      emit('auth', info);
+    }
+
+    // ---- 云端项目：路径 / 清单（清单是所有设备共享的索引）----
+    var PROJECT_ID = /^[A-Za-z0-9_-]+$/;
+
+    function requireUid() {
+      if (!cloud) throw new Error(initError || 'cloud_unavailable');
+      var info = describe();
+      var uid = info.user && info.user.id;
+      if (!info.signedIn || !uid) throw new Error('not_signed_in');
+      return uid;
+    }
+
+    function projectPath(uid, id) {
+      return cloud.storage.userPath(uid, 'shotflow/projects/' + id + '.json');
+    }
+
+    function manifestPath(uid) {
+      return cloud.storage.userPath(uid, 'shotflow/manifest.json');
+    }
+
+    function normalizeManifest(raw) {
+      var list = raw && Array.isArray(raw.projects) ? raw.projects : [];
+      var out = [];
+      for (var i = 0; i < list.length; i += 1) {
+        var it = list[i];
+        if (!it || typeof it.id !== 'string' || !PROJECT_ID.test(it.id)) continue;
+        out.push({
+          id: it.id,
+          name: typeof it.name === 'string' ? it.name : '',
+          updatedAt: typeof it.updatedAt === 'string' ? it.updatedAt : '',
+          hash: typeof it.hash === 'string' ? it.hash : '',
+          bytes: typeof it.bytes === 'number' ? it.bytes : 0
+        });
+      }
+      return { version: 2, at: raw && typeof raw.at === 'string' ? raw.at : null, projects: out };
+    }
+
+    async function readManifest(uid) {
+      var empty = { version: 2, at: null, projects: [] };
+      var res = await cloud.storage.download(manifestPath(uid));
+      if (res && res.error) return empty;
+      var blob = res && res.data ? res.data : res;
+      if (!blob || typeof blob.text !== 'function') return empty;
+      try {
+        var text = await blob.text();
+        return normalizeManifest(text ? JSON.parse(text) : null);
+      } catch (e) {
+        return empty;
+      }
+    }
+
+    // 覆盖写：先 upload(upsert)，对象已存在时退回 update()。
+    // 实测 upsert 参数对已存在对象会抛 STORAGE_KEY_ALREADY_EXISTS，不能只靠它。
+    async function putObject(path, text) {
+      var body = new Blob([text], { type: 'application/json' });
+      try {
+        var res = await cloud.storage.upload(path, body, {
+          contentType: 'application/json',
+          upsert: true
+        });
+        if (!res || !res.error) return;
+        throw res.error;
+      } catch (err) {
+        var message = String(err && err.message ? err.message : err);
+        if (!/already exists|ALREADY_EXISTS|KEY_ALREADY_EXISTS/i.test(message)) throw err;
+        var updated = await cloud.storage.update(path, body, { contentType: 'application/json' });
+        if (updated && updated.error) throw new Error(updated.error.message || 'update_failed');
+      }
+    }
+
+    async function writeManifest(uid, manifest) {
+      await putObject(manifestPath(uid), JSON.stringify(manifest));
+    }
+
+    function readBlobText(res) {
+      var blob = res && res.data ? res.data : res;
+      if (!blob || typeof blob.text !== 'function') return null;
+      return blob.text();
+    }
+
+    // ---- RPC ----
+    var handlers = {
+      ping: async function () {
+        return {
+          sdk: typeof WorkBuddyCloud,
+          href: location.href,
+          endpoint: CONFIG.endpoint,
+          signedIn: Boolean(session)
+        };
+      },
+      session: async function () {
+        await readSession();
+        return describe();
+      },
+      login: async function () {
+        if (!cloud) throw new Error(initError || 'cloud_unavailable');
+        setError('');
+        setStatus('正在打开微信授权…');
+        var res = await cloud.auth.signInWithOAuth({ provider: 'wechat', redirectTo: location.origin });
+        if (res && res.error) {
+          setStatus('无法发起微信登录');
+          setError(res.error.message || String(res.error));
+          throw new Error(res.error.message || 'oauth_failed');
+        }
+        var target = res && res.data && res.data.url;
+        if (!target) throw new Error('oauth_no_url');
+        emit('login-redirect', { url: target });
+        location.assign(target);
+        return { redirecting: true };
+      },
+      logout: async function () {
+        if (!cloud) return { ok: false };
+        await cloud.auth.signOut();
+        session = null;
+        setStatus('未登录');
+        $actions.hidden = false;
+        emit('auth', { signedIn: false, user: null });
+        return { ok: true };
+      },
+      // ---- 双向同步：清单读取 / 拉取 / 上传（合并清单）/ 删除 ----
+      manifest: async function () {
+        await readSession();
+        var uid = requireUid();
+        return readManifest(uid);
+      },
+      pull: async function (params) {
+        await readSession();
+        var uid = requireUid();
+        var ids = Array.isArray(params.ids) ? params.ids : [];
+        var files = [];
+        for (var i = 0; i < ids.length; i += 1) {
+          var id = ids[i];
+          if (typeof id !== 'string' || !PROJECT_ID.test(id)) continue;
+          try {
+            var res = await cloud.storage.download(projectPath(uid, id));
+            if (res && res.error) { files.push({ id: id, json: null, error: 'download_failed' }); continue; }
+            var text = await readBlobText(res);
+            files.push({ id: id, json: text, error: text ? null : 'empty' });
+          } catch (e) {
+            files.push({ id: id, json: null, error: e && e.message ? e.message : 'download_failed' });
+          }
+        }
+        return { files: files };
+      },
+      backup: async function (params) {
+        await readSession();
+        var uid = requireUid();
+
+        var items = Array.isArray(params.items) ? params.items : [];
+        var done = [];
+        for (var i = 0; i < items.length; i += 1) {
+          var it = items[i];
+          if (!it || typeof it.id !== 'string' || !PROJECT_ID.test(it.id) || typeof it.json !== 'string') continue;
+          await putObject(projectPath(uid, it.id), it.json);
+          done.push({
+            id: it.id,
+            name: typeof it.name === 'string' ? it.name : '',
+            updatedAt: typeof it.updatedAt === 'string' ? it.updatedAt : '',
+            hash: typeof it.hash === 'string' ? it.hash : '',
+            bytes: it.json.length
+          });
+        }
+
+        // 先读旧清单再合并：单项目上传不能把其他项目的条目冲掉
+        var manifest = await readManifest(uid);
+        var map = {};
+        manifest.projects.forEach(function (entry) { map[entry.id] = entry; });
+        done.forEach(function (entry) { map[entry.id] = entry; });
+
+        var remove = Array.isArray(params.remove) ? params.remove : [];
+        var removed = [];
+        for (var j = 0; j < remove.length; j += 1) {
+          var rid = remove[j];
+          if (typeof rid !== 'string' || !PROJECT_ID.test(rid)) continue;
+          try { await cloud.storage.remove([projectPath(uid, rid)]); } catch (e) { /* 对象可能已不存在 */ }
+          delete map[rid];
+          removed.push(rid);
+        }
+
+        var at = new Date().toISOString();
+        var next = {
+          version: 2,
+          at: at,
+          projects: Object.keys(map).map(function (key) { return map[key]; })
+        };
+        await writeManifest(uid, next);
+
+        setStatus('已同步 ' + next.projects.length + ' 个项目');
+        return { count: next.projects.length, uploaded: done.length, removed: removed.length, at: at };
+      },
+      remove: async function (params) {
+        await readSession();
+        var uid = requireUid();
+        var ids = Array.isArray(params.ids) ? params.ids : [];
+        var removed = [];
+        var manifest = await readManifest(uid);
+        var map = {};
+        manifest.projects.forEach(function (entry) { map[entry.id] = entry; });
+        for (var i = 0; i < ids.length; i += 1) {
+          var id = ids[i];
+          if (typeof id !== 'string' || !PROJECT_ID.test(id)) continue;
+          try { await cloud.storage.remove([projectPath(uid, id)]); } catch (e) { /* 忽略单个失败 */ }
+          delete map[id];
+          removed.push(id);
+        }
+        await writeManifest(uid, {
+          version: 2,
+          at: new Date().toISOString(),
+          projects: Object.keys(map).map(function (key) { return map[key]; })
+        });
+        return { removed: removed.length };
+      },
+      backupInfo: async function () {
+        await readSession();
+        var uid = requireUid();
+        var manifest = await readManifest(uid);
+        return { count: manifest.projects.length, at: manifest.at, projects: manifest.projects };
+      }
+    };
+
+    transport.onMessage(async function (msg) {
+      if (!msg || msg.type !== 'req' || !msg.id) return;
+      var fn = handlers[msg.method];
+      try {
+        if (!fn) throw new Error('unknown_method:' + msg.method);
+        var data = await fn(msg.params || {});
+        send({ type: 'res', id: msg.id, ok: true, data: data });
+      } catch (e) {
+        send({ type: 'res', id: msg.id, ok: false, error: e && e.message ? e.message : String(e) });
+      }
+    });
+
+    $login.addEventListener('click', function () {
+      handlers.login().catch(function (e) { setError(e.message); });
+    });
+
+    bootstrap();
+  })();
+  </script>
+</body>
+</html>
